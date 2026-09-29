@@ -199,17 +199,31 @@ type recvSegment struct {
 
 // Default window parameters
 const (
-	InitialCongWin = 10 * MaxSegmentSize          // 40 KB initial congestion window (IW10, RFC 6928)
-	MaxCongWin     = 1024 * 1024                  // 1 MB max congestion window
-	MaxSegmentSize = 4096                         // MTU for virtual segments
+	InitialCongWin = 10 * MaxSegmentSize // IW10 (RFC 6928): 10 segments, ~11.5 KB
+	MaxCongWin     = 1024 * 1024         // 1 MB max congestion window
+
+	// MaxSegmentSize is the largest payload carried by one virtual segment,
+	// and every segment is sent as a single UDP datagram. With the secure
+	// tunnel and beacon relay wrapping, a full segment is
+	// 1152 + 34 (packet header) + 36 (PILS magic 4 + node ID 4 + nonce 12 +
+	// GCM tag 16) + 9 (relay header) = 1231 bytes of UDP payload, i.e. 1279
+	// bytes with IPv6/UDP headers, so it needs no IP fragmentation on any
+	// path whose MTU is at least the IPv6 minimum of 1280. Paths that drop IP
+	// fragments (many VPNs, CGNATs, mobile networks) otherwise lose every
+	// larger datagram, and because the same oversized segment is
+	// retransmitted, the stream stalls for good. See
+	// TestSegmentDatagramFitsMinimumMTU. The receive path does not limit
+	// segment size, so peers still sending 4096-byte segments interoperate.
+	MaxSegmentSize = 1152
 	RecvBufSize    = 512                          // receive buffer channel capacity (segments)
-	MaxRecvWin     = RecvBufSize * MaxSegmentSize // 2 MB max receive window
+	MaxRecvWin     = RecvBufSize * MaxSegmentSize // 576 KB max receive window (512 segments)
 	MaxOOOBuf      = 128                          // max out-of-order segments buffered per connection
 	AcceptQueueLen = 64                           // listener accept channel capacity
 	SendBufLen     = 256                          // send buffer channel capacity (segments)
 
-	// MaxNagleBuf caps the per-connection NagleBuf at 64 segments
-	// (256 KB). v1.9.1 fix: SendData previously appended without bound,
+	// MaxNagleBuf caps the per-connection NagleBuf at 256 KB (it was
+	// expressed as 64 segments while segments were 4 KB; it is a byte cap,
+	// independent of MaxSegmentSize). v1.9.1 fix: SendData previously appended without bound,
 	// so an application writing faster than the network could drain
 	// (slow peer, full cwnd, packet loss) leaked memory linearly with
 	// offered-but-undeliverable load. With many connections in that
@@ -218,7 +232,7 @@ const (
 	// this cap; callers must retry with backpressure.
 	// 256 KB accommodates the largest single data-exchange frame
 	// (64 KB) with headroom, while still bounding per-connection memory.
-	MaxNagleBuf = 64 * MaxSegmentSize
+	MaxNagleBuf = 256 * 1024
 )
 
 // RTO parameters (RFC 6298)

@@ -511,8 +511,8 @@ func TestProcessAckGrowsCongWinInCongestionAvoidance(t *testing.T) {
 	c.Unacked = []*retxEntry{{seq: 1000, data: make([]byte, 1000), attempts: 1, sentAt: time.Now()}}
 
 	c.ProcessAck(2000, true)
-	// CA: increment = MSS * bytesAcked / CongWin = 4096*1000/50000 = 81 (floor)
-	want := 50000 + 4096*1000/50000
+	// CA: increment = MSS * bytesAcked / CongWin (floor)
+	want := 50000 + MaxSegmentSize*1000/50000
 	if c.CongWin != want {
 		t.Fatalf("CongWin = %d, want %d", c.CongWin, want)
 	}

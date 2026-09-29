@@ -343,6 +343,15 @@ Detailed per-release notes are on the
   failures after plugins have started now stop them before exiting, too.
   (Complements the app-store's orphan reaping at spawn,
   pilot-protocol/app-store#38.)
+- **Messages larger than one MTU no longer stall on paths that drop IP
+  fragments.** Every stream segment was sent as one UDP datagram of up to
+  ~4.2 KB, which needs IP fragmentation; VPNs, carrier-grade NATs and some
+  mobile networks drop fragments, and since the same oversized segment was
+  retransmitted unchanged the stream never progressed. `MaxSegmentSize` is now
+  1152 bytes, so a full segment with tunnel framing and beacon relay wrapping
+  is at most 1231 bytes of UDP payload and, with ordinary IP headers, needs
+  no fragmentation on paths with an effective MTU of at least 1280. No
+  wire-format change; the receive path does not limit segment size. (daemon)
 - **The `pilotctl skills disable` opt-out now survives updates and explicit
   reconciles.** A forced reconcile — `pilotctl skills check`, `pilotctl update`,
   or an installer re-run — bypassed the disabled flag and re-injected skills a
