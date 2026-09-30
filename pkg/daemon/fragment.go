@@ -31,8 +31,10 @@ import (
 // PILS, signatures for PILA, the existing policies for PILK and plaintext), so
 // fragmentation adds no way around them. Admission is accounted per actual
 // source (remote UDP address, or the beacon-reported relay sender), never per
-// the claimed sender ID, so a third party cannot use up another peer's quota;
-// memory is bounded by the limits below.
+// the claimed sender ID, so claiming another peer's ID does not use up that
+// peer's quota. This bounds memory; it is not flood isolation (a few source
+// ports can fill the global pool, and relay accounting trusts the beacon's
+// sender report).
 // Both peers must support PILF: a peer without it drops the fragments, so
 // frames larger than one fragment do not reach it.
 

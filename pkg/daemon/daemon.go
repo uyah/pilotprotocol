@@ -4673,6 +4673,14 @@ func (d *Daemon) retransmitUnacked(conn *Connection) {
 // local reader's receive buffer closed. Used when data that was handed to the
 // daemon cannot be sent, so the stream must not continue with a gap.
 func (d *Daemon) abortConnection(conn *Connection, reason string) {
+	conn.Mu.Lock()
+	if conn.aborted {
+		conn.Mu.Unlock()
+		return
+	}
+	conn.aborted = true // claim first: a later CloseConnection is a no-op
+	conn.State = StateClosed
+	conn.Mu.Unlock()
 	rst := &protocol.Packet{
 		Version:  protocol.Version,
 		Flags:    protocol.FlagRST,
@@ -4685,9 +4693,12 @@ func (d *Daemon) abortConnection(conn *Connection, reason string) {
 	if err := d.tunnels.Send(conn.RemoteAddr.Node, rst); err != nil {
 		slog.Debug("abort: RST send failed", "conn_id", conn.ID, "err", err)
 	}
-	conn.Mu.Lock()
-	conn.State = StateClosed
-	conn.Mu.Unlock()
+	conn.AckMu.Lock()
+	if conn.ACKTimer != nil { // no delayed ACK after the reset
+		conn.ACKTimer.Stop()
+		conn.ACKTimer = nil
+	}
+	conn.AckMu.Unlock()
 	conn.CloseRecvBuf()
 	d.ports.RemoveConnection(conn.ID)
 	d.publishEvent("conn.aborted", map[string]interface{}{
@@ -4705,10 +4716,18 @@ func (d *Daemon) CloseConnection(conn *Connection) {
 	// segment with the same seq as the FIN sentinel (iter 24 fix, same
 	// pattern as the sendSegment pre-increment fix in iter 23).
 	conn.Mu.Lock()
+	if conn.aborted {
+		conn.Mu.Unlock()
+		return // already reset by abortConnection: no FIN, no delivery event
+	}
 	st := conn.State
 	sendSeq := conn.SendSeq
 	if st == StateEstablished {
 		conn.SendSeq++ // reserve FIN seq atomically with the read
+		// Claim the close before any side effect (FIN, file.delivered), so a
+		// concurrent abortConnection either happened first (state CLOSED,
+		// nothing below runs for it) or sees this close in progress.
+		conn.State = StateFinWait
 	}
 	localAddr := conn.LocalAddr
 	localPort := conn.LocalPort
@@ -4765,7 +4784,9 @@ func (d *Daemon) CloseConnection(conn *Connection) {
 	}
 	conn.AckMu.Unlock()
 	conn.Mu.Lock()
-	conn.State = StateFinWait
+	if !conn.aborted { // an abort that raced in after the claim wins
+		conn.State = StateFinWait
+	}
 	conn.LastActivity = time.Now()
 	conn.Mu.Unlock()
 }

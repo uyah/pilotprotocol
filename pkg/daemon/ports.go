@@ -237,6 +237,7 @@ type Connection struct {
 	RemoteAddr   protocol.Addr
 	RemotePort   uint16
 	State        ConnState
+	aborted      bool // set by abortConnection; protected by Mu
 	LastActivity time.Time // updated on send/recv
 	// Reliable delivery
 	SendSeq uint32

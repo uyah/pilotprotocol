@@ -1046,7 +1046,7 @@ func (s *IPCServer) handleSend(conn *ipcConn, reqID uint64, payload []byte) {
 	if err := s.daemon.sendDataBlocking(c, data, connAdapterWriteDeadline); err != nil {
 		slog.Warn("IPC stream send failed; aborting the stream instead of dropping data",
 			"conn_id", connID, "bytes", len(data), "err", err)
-		s.daemon.abortConnection(c, "send buffer full")
+		s.daemon.abortConnection(c, err.Error())
 	}
 }
 
