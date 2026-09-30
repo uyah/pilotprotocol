@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,5 +116,56 @@ func TestAbortAfterCloseEndsClosed(t *testing.T) {
 	}
 	if !sawRST {
 		t.Fatal("no RST after abort following a graceful close")
+	}
+}
+
+// Close and abort racing for real: whatever the interleaving, no FIN may
+// leave after the RST, the connection ends CLOSED, and nothing stays queued
+// for retransmission.
+func TestAbortCloseConcurrentNeverFINAfterRST(t *testing.T) {
+	t.Parallel()
+	for i := 0; i < 200; i++ {
+		d, peer, conn := setupSendDataConn(t)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); <-start; d.CloseConnection(conn) }()
+		go func() { defer wg.Done(); <-start; d.abortConnection(conn, "race") }()
+		close(start)
+		wg.Wait()
+
+		conn.Mu.Lock()
+		st := conn.State
+		conn.Mu.Unlock()
+		if st != StateClosed {
+			t.Fatalf("iteration %d: state = %v, want CLOSED", i, st)
+		}
+		conn.RetxMu.Lock()
+		queued := len(conn.Unacked)
+		conn.RetxMu.Unlock()
+		if queued != 0 {
+			t.Fatalf("iteration %d: %d entries still queued for retransmission after abort", i, queued)
+		}
+		sawRST := false
+		buf := make([]byte, 65536)
+		for {
+			peer.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, _, err := readFrameUDP(peer, buf)
+			if err != nil {
+				break
+			}
+			pkt, err := protocol.Unmarshal(buf[4:n])
+			if err != nil {
+				continue
+			}
+			if pkt.HasFlag(protocol.FlagRST) {
+				sawRST = true
+			} else if pkt.HasFlag(protocol.FlagFIN) && sawRST {
+				t.Fatalf("iteration %d: FIN sent after RST", i)
+			}
+		}
+		if !sawRST {
+			t.Fatalf("iteration %d: no RST", i)
+		}
 	}
 }

@@ -3665,6 +3665,10 @@ func (d *Daemon) sendDelayedACK(conn *Connection) {
 	conn.AckMu.Unlock()
 
 	conn.Mu.Lock()
+	if conn.aborted { // nothing is sent after a reset
+		conn.Mu.Unlock()
+		return
+	}
 	sendSeq := conn.SendSeq
 	recvAck := conn.RecvAck
 	conn.Mu.Unlock()
@@ -4673,6 +4677,8 @@ func (d *Daemon) retransmitUnacked(conn *Connection) {
 // local reader's receive buffer closed. Used when data that was handed to the
 // daemon cannot be sent, so the stream must not continue with a gap.
 func (d *Daemon) abortConnection(conn *Connection, reason string) {
+	conn.teardownMu.Lock()
+	defer conn.teardownMu.Unlock()
 	conn.Mu.Lock()
 	if conn.aborted {
 		conn.Mu.Unlock()
@@ -4681,6 +4687,16 @@ func (d *Daemon) abortConnection(conn *Connection, reason string) {
 	conn.aborted = true // claim first: a later CloseConnection is a no-op
 	conn.State = StateClosed
 	conn.Mu.Unlock()
+	// Drop everything still queued for (re)transmission, including a FIN
+	// queued by an earlier close: nothing may follow the RST. Retransmission
+	// and fast retransmit run under RetxMu, so after this point they find
+	// nothing to send.
+	conn.RetxMu.Lock()
+	conn.Unacked = nil
+	conn.RetxMu.Unlock()
+	conn.NagleMu.Lock()
+	conn.NagleBuf = nil
+	conn.NagleMu.Unlock()
 	rst := &protocol.Packet{
 		Version:  protocol.Version,
 		Flags:    protocol.FlagRST,
@@ -4694,7 +4710,7 @@ func (d *Daemon) abortConnection(conn *Connection, reason string) {
 		slog.Debug("abort: RST send failed", "conn_id", conn.ID, "err", err)
 	}
 	conn.AckMu.Lock()
-	if conn.ACKTimer != nil { // no delayed ACK after the reset
+	if conn.ACKTimer != nil { // sendDelayedACK also checks aborted
 		conn.ACKTimer.Stop()
 		conn.ACKTimer = nil
 	}
@@ -4708,6 +4724,10 @@ func (d *Daemon) abortConnection(conn *Connection, reason string) {
 }
 
 func (d *Daemon) CloseConnection(conn *Connection) {
+	// teardownMu makes this whole close (claim, delivery event, FIN, FIN
+	// retransmission entry) atomic with respect to abortConnection.
+	conn.teardownMu.Lock()
+	defer conn.teardownMu.Unlock()
 	// Capture every conn field this function reads under Mu; reading them
 	// post-unlock would race with concurrent state mutations from
 	// handleStreamPacket / sendDelayedACK / sendSegment paths.
