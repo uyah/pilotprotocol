@@ -4607,6 +4607,7 @@ func (d *Daemon) retransmitUnacked(conn *Connection) {
 
 			e.attempts++
 			e.sentAt = now
+			e.lastRetx = now
 			conn.Mu.Lock()
 			conn.Stats.Retransmits++
 			conn.Mu.Unlock()

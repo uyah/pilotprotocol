@@ -189,6 +189,7 @@ type retxEntry struct {
 	attempts   int
 	sacked     bool // true if covered by a SACK block (don't retransmit)
 	isFIN      bool // true for the FIN sentinel entry (retransmit as FlagFIN, not data)
+	lastRetx   time.Time // last retransmission (zero if never); never reset by ACKs
 }
 
 // recvSegment is an out-of-order received segment waiting for reassembly.
@@ -1108,6 +1109,20 @@ func (c *Connection) ProcessAck(ack uint32, pureACK bool) {
 		}
 	}
 
+	// Timeout (not fast) recovery made progress: the connection is alive, so
+	// drop the exponential RTO backoff (RFC 6298 §5.7 allows this; Karn's
+	// rule leaves no RTT sample while every acked segment was retransmitted)
+	// and resend the other segments presumed lost at the timeout within the
+	// congestion window instead of one per (backed-off) RTO. Without this, a
+	// burst loss of N segments took about N x 10 s to repair: each ACK
+	// restarts every remaining segment's timer with the backed-off RTO.
+	if bytesAcked > 0 && wasInRecovery && !wasFastRecovery {
+		c.resetRTOBackoff()
+		if c.InRecovery {
+			c.retransmitLostAfterTimeout(recvAck)
+		}
+	}
+
 	// Signal that window opened up
 	if c.WindowCh != nil {
 		select {
@@ -1154,6 +1169,7 @@ func (c *Connection) fastRetransmit(recvAck uint32) bool {
 		}
 		e.attempts++
 		e.sentAt = time.Now()
+		e.lastRetx = e.sentAt
 		// FIN entries must be resent as FlagFIN with no payload; data entries
 		// use FlagACK with their payload (mirrors retransmitUnacked's isFIN check).
 		flags := protocol.FlagACK
@@ -1180,6 +1196,86 @@ func (c *Connection) fastRetransmit(recvAck uint32) bool {
 		return true
 	}
 	return false
+}
+
+// resetRTOBackoff recomputes RTO from the current SRTT/RTTVAR (or the
+// initial RTO when there is no sample yet), discarding timeout backoff.
+// Must be called with RetxMu held.
+func (c *Connection) resetRTOBackoff() {
+	if c.SRTT == 0 {
+		c.RTO = InitialRTO
+		return
+	}
+	kvar := c.RTTVAR * 4
+	if kvar < ClockGranularity {
+		kvar = ClockGranularity
+	}
+	c.RTO = c.SRTT + kvar
+	if c.RTO < RTOMin {
+		c.RTO = RTOMin
+	}
+	if c.RTO > RTOMax {
+		c.RTO = RTOMax
+	}
+}
+
+// maxRecoveryRetxPerAck bounds how many segments one ACK can trigger in
+// retransmitLostAfterTimeout.
+const maxRecoveryRetxPerAck = 64
+
+// retransmitLostAfterTimeout resends, after a partial ACK in timeout
+// recovery, the unacknowledged segments sent before the timeout (below
+// RecoveryPoint, not SACKed), up to one congestion window per ACK. A segment
+// retransmitted within the last SRTT (at least RTOMin) is skipped, so each
+// lost segment is resent at most about once per round trip.
+// Must be called with RetxMu held.
+func (c *Connection) retransmitLostAfterTimeout(recvAck uint32) {
+	if c.RetxSend == nil {
+		return
+	}
+	budget := c.CongWin / MaxSegmentSize
+	if budget < 1 {
+		budget = 1
+	}
+	if budget > maxRecoveryRetxPerAck {
+		budget = maxRecoveryRetxPerAck
+	}
+	guard := c.SRTT
+	if guard < RTOMin {
+		guard = RTOMin
+	}
+	now := time.Now()
+	for _, e := range c.Unacked {
+		if budget == 0 {
+			return
+		}
+		if e.sacked || e.isFIN || !seqAfter(c.RecoveryPoint, e.seq) {
+			continue
+		}
+		if !e.lastRetx.IsZero() && now.Sub(e.lastRetx) < guard {
+			continue
+		}
+		if e.attempts >= MaxRetxAttempts {
+			return // retransmitUnacked will reset the connection
+		}
+		e.attempts++
+		e.sentAt = now
+		e.lastRetx = now
+		c.RetxSend(&protocol.Packet{
+			Version:  protocol.Version,
+			Flags:    protocol.FlagACK,
+			Protocol: protocol.ProtoStream,
+			Src:      c.LocalAddr,
+			Dst:      c.RemoteAddr,
+			SrcPort:  c.LocalPort,
+			DstPort:  c.RemotePort,
+			Seq:      e.seq,
+			Ack:      recvAck,
+			Window:   c.RecvWindow(),
+			Payload:  e.data,
+		})
+		budget--
+	}
 }
 
 func (c *Connection) updateRTT(rtt time.Duration) {
