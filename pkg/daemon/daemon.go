@@ -3601,11 +3601,15 @@ func (d *Daemon) handleStreamPacket(pkt *protocol.Packet) {
 				isPureACK = false
 			}
 			conn.ProcessAck(pkt.Ack, isPureACK)
+			if !isSACK {
+				conn.RunRecoveryRetransmit()
+			}
 		}
 
 		// Check if payload is SACK info (not user data)
 		if isSACK {
 			conn.ProcessSACK(sackBlocks)
+			conn.RunRecoveryRetransmit() // after this packet's SACKs are applied
 		} else if len(pkt.Payload) > 0 {
 			conn.Mu.Lock()
 			established := conn.State == StateEstablished
