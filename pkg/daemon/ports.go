@@ -1206,13 +1206,18 @@ const maxRecoveryRetxPerAck = 64
 // when the packet carries no SACK).
 func (c *Connection) RunRecoveryRetransmit() {
 	c.RetxMu.Lock()
-	defer c.RetxMu.Unlock()
-	if !c.recoveryRetxPending {
-		return
+	sent := 0
+	if c.recoveryRetxPending {
+		c.recoveryRetxPending = false
+		if c.InRecovery && !c.FastRecovery {
+			sent = c.retransmitLostAfterTimeout(c.recoveryRetxAck)
+		}
 	}
-	c.recoveryRetxPending = false
-	if c.InRecovery && !c.FastRecovery {
-		c.retransmitLostAfterTimeout(c.recoveryRetxAck)
+	c.RetxMu.Unlock()
+	if sent > 0 { // Mu after RetxMu is released (lock-order convention)
+		c.Mu.Lock()
+		c.Stats.Retransmits += uint64(sent)
+		c.Mu.Unlock()
 	}
 }
 
@@ -1222,11 +1227,13 @@ func (c *Connection) RunRecoveryRetransmit() {
 // the data still in flight: segments resent within the current RTO and new
 // data sent after the timeout. The presumed-lost originals are not counted
 // as in flight. RTO keeps its backoff (it is recomputed only from a valid RTT
-// sample). At most maxRecoveryRetxPerAck segments per call.
-// Must be called with RetxMu held.
-func (c *Connection) retransmitLostAfterTimeout(recvAck uint32) {
+// sample). At most maxRecoveryRetxPerAck segments per call, and this batch
+// selection resends a segment at most once per RTO (fastRetransmit on three
+// duplicate ACKs is a separate path and does not consult lastRetx).
+// Returns the number of segments resent. Must be called with RetxMu held.
+func (c *Connection) retransmitLostAfterTimeout(recvAck uint32) int {
 	if c.RetxSend == nil {
-		return
+		return 0
 	}
 	now := time.Now()
 	recent := func(e *retxEntry) bool { return !e.lastRetx.IsZero() && now.Sub(e.lastRetx) < c.RTO }
@@ -1248,8 +1255,8 @@ func (c *Connection) retransmitLostAfterTimeout(recvAck uint32) {
 		if e.sacked || e.isFIN || !seqAfter(c.RecoveryPoint, e.seq) || recent(e) {
 			continue
 		}
-		if len(e.data) > budget && !(sent == 0 && inFlight == 0) {
-			break // window full (always allow one segment when nothing is in flight)
+		if len(e.data) > budget {
+			break // window full
 		}
 		if e.attempts >= MaxRetxAttempts {
 			break // retransmitUnacked will reset the connection
@@ -1273,11 +1280,7 @@ func (c *Connection) retransmitLostAfterTimeout(recvAck uint32) {
 		budget -= len(e.data)
 		sent++
 	}
-	if sent > 0 {
-		c.Mu.Lock()
-		c.Stats.Retransmits += uint64(sent)
-		c.Mu.Unlock()
-	}
+	return sent
 }
 
 func (c *Connection) updateRTT(rtt time.Duration) {

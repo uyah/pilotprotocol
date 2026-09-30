@@ -53,6 +53,9 @@ func TestTimeoutRecoveryPartialAckResendsLost(t *testing.T) {
 	n := len(*sent)
 	c.ProcessAck(1200, true)
 	c.RunRecoveryRetransmit()
+	if len(*sent) == n {
+		t.Fatal("second partial ACK resent nothing: recovery must keep progressing")
+	}
 	for _, s := range (*sent)[n:] {
 		for _, prev := range (*sent)[:n] {
 			if s == prev {
@@ -133,5 +136,40 @@ func TestFastRecoveryPartialAckUnchanged(t *testing.T) {
 	}
 	if len(sent) != 1 || sent[0] != 1100 {
 		t.Fatalf("fast-recovery partial ACK resent %v, want exactly [1100]", sent)
+	}
+}
+
+// Resends are counted in Stats.Retransmits; new data sent after the timeout
+// (at or beyond RecoveryPoint) counts as in flight; nothing is resent once
+// recovery has ended.
+func TestTimeoutRecoveryStatsNewDataAndExit(t *testing.T) {
+	t.Parallel()
+	c, sent := timeoutRecoveryConn(t, 6) // RecoveryPoint 1600
+	// Two new-data segments sent after the timeout, still in flight.
+	now := time.Now()
+	c.Unacked = append(c.Unacked,
+		&retxEntry{seq: 1600, data: make([]byte, 100), sentAt: now, origSentAt: now, attempts: 1},
+		&retxEntry{seq: 1700, data: make([]byte, 100), sentAt: now, origSentAt: now, attempts: 1})
+	c.CongWin = 300 // new data (200) leaves room for one resend after the ACK grows cwnd
+	c.ProcessAck(1100, true)
+	c.RunRecoveryRetransmit()
+	if len(*sent) == 0 {
+		t.Fatal("nothing resent")
+	}
+	c.Mu.Lock()
+	retx := c.Stats.Retransmits
+	c.Mu.Unlock()
+	if retx != uint64(len(*sent)) {
+		t.Fatalf("Stats.Retransmits = %d, want %d", retx, len(*sent))
+	}
+	if len(*sent)*100+200 > c.CongWin {
+		t.Fatalf("resent %d segments with 200 bytes of new data in flight and cwnd %d", len(*sent), c.CongWin)
+	}
+	// Recovery ends: a later pending run must not resend anything.
+	n := len(*sent)
+	c.ProcessAck(1600, true) // ACK reaches RecoveryPoint
+	c.RunRecoveryRetransmit()
+	if len(*sent) != n {
+		t.Fatalf("resent %v after recovery ended", (*sent)[n:])
 	}
 }
