@@ -124,27 +124,38 @@ func (a *connAdapter) Write(p []byte) (int, error) {
 	// failure. ErrSendBufFull is transient back-pressure (just like a
 	// kernel TCP send buffer being full), so block-and-retry until the
 	// flush goroutine drains the buffer.
+	if err := a.daemon.sendDataBlocking(a.conn, p, connAdapterWriteDeadline); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// sendDataBlocking is SendData with back-pressure: while the connection's
+// send buffer is full it waits (5 ms doubling to 100 ms) and retries, until
+// the data is accepted, the connection leaves Established, or maxWait passes
+// (then the ErrSendBufFull is returned). It never drops data silently.
+func (d *Daemon) sendDataBlocking(conn *Connection, p []byte, maxWait time.Duration) error {
 	backoff := 5 * time.Millisecond
 	const maxBackoff = 100 * time.Millisecond
-	deadline := time.Now().Add(connAdapterWriteDeadline)
+	deadline := time.Now().Add(maxWait)
 	for {
-		err := a.daemon.SendData(a.conn, p)
+		err := d.SendData(conn, p)
 		if err == nil {
-			return len(p), nil
+			return nil
 		}
 		if !errors.Is(err, ErrSendBufFull) {
-			return 0, err
+			return err
 		}
 		// Bail if the connection itself moved out of Established —
 		// retrying would loop forever against a half-closed conn.
-		a.conn.Mu.Lock()
-		st := a.conn.State
-		a.conn.Mu.Unlock()
+		conn.Mu.Lock()
+		st := conn.State
+		conn.Mu.Unlock()
 		if st != StateEstablished {
-			return 0, fmt.Errorf("connection no longer established (state=%v)", st)
+			return fmt.Errorf("connection no longer established (state=%v)", st)
 		}
 		if time.Now().After(deadline) {
-			return 0, err
+			return err
 		}
 		time.Sleep(backoff)
 		if backoff < maxBackoff {

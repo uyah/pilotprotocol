@@ -44,7 +44,7 @@ func readOneSegment(t *testing.T, pc *net.UDPConn, dur time.Duration) *protocol.
 	t.Helper()
 	pc.SetReadDeadline(time.Now().Add(dur))
 	buf := make([]byte, 65535)
-	n, _, err := pc.ReadFromUDP(buf)
+	n, _, err := readFrameUDP(pc, buf)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}

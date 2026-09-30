@@ -69,6 +69,8 @@ const (
 
 // TunnelManager manages real UDP tunnels to peer daemons.
 type TunnelManager struct {
+	frag *fragReassembler // PILF reassembly (fragment.go)
+
 	mu sync.RWMutex
 	// sock is the L2 datagram-I/O transport. Send / Recv on tm.sock are
 	// "dumb" primitives — relay wrapping, per-peer counters, and
@@ -399,6 +401,7 @@ func NewTunnelManager() *TunnelManager {
 		routing:         routing.New(),
 		kxRateLim:       make(map[string]*srcKxBucket),
 		relayKxLim:      make(map[uint32]*srcKxBucket),
+		frag:            newFragReassembler(),
 	}
 	tm.routing.SetLocalNodeIDFn(tm.loadNodeID)
 	tm.kx = keyexchange.New(store)
@@ -849,6 +852,23 @@ const sendErrThreshold = routing.SendErrThreshold
 // the public BytesSent / PktsSent atomics and logs flips that the
 // routing-side heuristic triggers.
 func (tm *TunnelManager) writeFrame(nodeID uint32, addr *net.UDPAddr, frame []byte) error {
+	if len(frame) <= fragMaxFrame {
+		return tm.writeFrameOne(nodeID, addr, frame)
+	}
+	frags := fragmentFrame(tm.loadNodeID(), tm.frag.nextID.Add(1), frame)
+	if frags == nil {
+		return fmt.Errorf("frame of %d bytes exceeds the fragmentation limit", len(frame))
+	}
+	for _, f := range frags {
+		if err := tm.writeFrameOne(nodeID, addr, f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeFrameOne sends one datagram-sized frame (see writeFrame).
+func (tm *TunnelManager) writeFrameOne(nodeID uint32, addr *net.UDPAddr, frame []byte) error {
 	if diagShouldDropFrame() {
 		return nil
 	}
@@ -1331,6 +1351,16 @@ func (tm *TunnelManager) readLoopOneIter() (cont bool, stopped bool) {
 
 	if n < 4 {
 		return true, false
+	}
+
+	// PILF fragment (fragment.go): reassemble, then dispatch the original
+	// frame below as if it had arrived in one datagram.
+	if [4]byte{frame[0], frame[1], frame[2], frame[3]} == TunnelMagicFrag {
+		full := tm.frag.add(frame[4:], remote, 0, time.Now())
+		if full == nil || len(full) < 4 || [4]byte{full[0], full[1], full[2], full[3]} == TunnelMagicFrag {
+			return true, false // incomplete, or a nested fragment (never valid)
+		}
+		frame, n = full, len(full)
 	}
 
 	magic := [4]byte{frame[0], frame[1], frame[2], frame[3]}
@@ -2009,12 +2039,7 @@ func (tm *TunnelManager) SendDirectProbe(nodeID uint32, pkt *protocol.Packet) er
 		copy(frame[4:], data)
 	}
 
-	n, werr := tm.sock.Send(frame, addr)
-	if werr == nil {
-		atomic.AddUint64(&tm.PktsSent, 1)
-		atomic.AddUint64(&tm.BytesSent, uint64(n))
-	}
-	return werr
+	return tm.sendRawFragmented(frame, addr)
 }
 
 // SendDirectProbeTo sends an encrypted probe to an EXPLICIT address rather
@@ -2049,13 +2074,11 @@ func (tm *TunnelManager) SendDirectProbeTo(nodeID uint32, addr *net.UDPAddr, pkt
 		copy(frame[0:4], protocol.TunnelMagic[:])
 		copy(frame[4:], data)
 	}
-	n, werr := tm.sock.Send(frame, addr)
-	if werr == nil {
-		atomic.AddUint64(&tm.PktsSent, 1)
-		atomic.AddUint64(&tm.BytesSent, uint64(n))
-		tm.routing.RecordOutboundSend(nodeID, time.Now())
+	if err := tm.sendRawFragmented(frame, addr); err != nil {
+		return err
 	}
-	return werr
+	tm.routing.RecordOutboundSend(nodeID, time.Now())
+	return nil
 }
 
 // clearRelayOnDirectLocked is the legacy shim for tests that drive
@@ -2435,6 +2458,15 @@ func (tm *TunnelManager) handleRelayDeliver(data []byte) {
 	}
 
 	// Process the inner tunnel frame
+	// PILF fragment delivered by the beacon: reassemble per relay sender.
+	if [4]byte{payload[0], payload[1], payload[2], payload[3]} == TunnelMagicFrag {
+		full := tm.frag.add(payload[4:], nil, srcNodeID, time.Now())
+		if full == nil || len(full) < 4 || [4]byte{full[0], full[1], full[2], full[3]} == TunnelMagicFrag {
+			return
+		}
+		payload = full
+	}
+
 	magic := [4]byte{payload[0], payload[1], payload[2], payload[3]}
 	switch magic {
 	case protocol.TunnelMagicAuthEx:
@@ -2484,4 +2516,24 @@ func (tm *TunnelManager) RecvCh() <-chan *IncomingPacket {
 // the canonical implementation lives at pkg/daemon/routing/discover.go.
 func DiscoverEndpoint(beaconAddr string, nodeID uint32, conn *net.UDPConn) (*net.UDPAddr, error) {
 	return routing.DiscoverEndpoint(beaconAddr, nodeID, conn, fixedTimeout())
+}
+
+// sendRawFragmented writes frame straight to addr (no relay wrapping),
+// splitting it into PILF fragments when it does not fit one datagram.
+func (tm *TunnelManager) sendRawFragmented(frame []byte, addr *net.UDPAddr) error {
+	frags := [][]byte{frame}
+	if len(frame) > fragMaxFrame {
+		if frags = fragmentFrame(tm.loadNodeID(), tm.frag.nextID.Add(1), frame); frags == nil {
+			return fmt.Errorf("frame of %d bytes exceeds the fragmentation limit", len(frame))
+		}
+	}
+	for _, f := range frags {
+		n, werr := tm.sock.Send(f, addr)
+		if werr != nil {
+			return werr
+		}
+		atomic.AddUint64(&tm.PktsSent, 1)
+		atomic.AddUint64(&tm.BytesSent, uint64(n))
+	}
+	return nil
 }

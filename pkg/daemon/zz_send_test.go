@@ -55,7 +55,7 @@ func TestRouteLoopDispatchesPingAndExitsOnClose(t *testing.T) {
 	// Expect pong on peer socket.
 	peerConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	buf := make([]byte, 2048)
-	n, _, err := peerConn.ReadFromUDP(buf)
+	n, _, err := readFrameUDP(peerConn, buf)
 	if err != nil {
 		t.Fatalf("expected pong: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestSendDelayedACKClearsPendingAndEmitsPureACK(t *testing.T) {
 	// Verify pure-ACK packet landed on peer socket with the right fields.
 	peerConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	buf := make([]byte, 2048)
-	n, _, err := peerConn.ReadFromUDP(buf)
+	n, _, err := readFrameUDP(peerConn, buf)
 	if err != nil {
 		t.Fatalf("expected ACK: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestSendDelayedACKWithSACKBlocksIncludesSACKPayload(t *testing.T) {
 
 	peerConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	buf := make([]byte, 2048)
-	n, _, err := peerConn.ReadFromUDP(buf)
+	n, _, err := readFrameUDP(peerConn, buf)
 	if err != nil {
 		t.Fatalf("expected ACK: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestSendDataImmediateEmptyDataNoSegments(t *testing.T) {
 	}
 	peerConn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 	buf := make([]byte, 2048)
-	if _, _, err := peerConn.ReadFromUDP(buf); err == nil {
+	if _, _, err := readFrameUDP(peerConn, buf); err == nil {
 		t.Fatal("no segment should be sent for empty data")
 	}
 }
@@ -263,7 +263,7 @@ func TestSendDataImmediateSendsSingleSegmentUnderMSS(t *testing.T) {
 
 	peerConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	buf := make([]byte, 8192)
-	n, _, err := peerConn.ReadFromUDP(buf)
+	n, _, err := readFrameUDP(peerConn, buf)
 	if err != nil {
 		t.Fatalf("expected segment: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestSendDataImmediateSplitsIntoMSSSegments(t *testing.T) {
 		}
 		peerConn.SetReadDeadline(time.Now().Add(rem))
 		buf := make([]byte, 8192)
-		n, _, err := peerConn.ReadFromUDP(buf)
+		n, _, err := readFrameUDP(peerConn, buf)
 		if err != nil {
 			break
 		}

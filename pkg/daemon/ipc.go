@@ -1031,11 +1031,18 @@ func (s *IPCServer) handleSend(conn *ipcConn, reqID uint64, payload []byte) {
 		return
 	}
 	// CmdSend is fire-and-forget on the wire (a CmdError reply would
-	// corrupt the driver's pending channel), but a dropped stream-send
-	// error is invisible to operators. Log it so the failure is
-	// observable even though the caller can't be told directly.
-	if err := s.daemon.SendData(c, data); err != nil {
-		slog.Warn("IPC stream send failed", "conn_id", connID, "bytes", len(data), "err", err)
+	// corrupt the driver's pending channel), so a send that cannot be
+	// accepted must never be dropped silently: the stream would continue
+	// with a gap and the receiver would see corrupted data. While the send
+	// buffer is full, wait like connAdapter.Write does. This runs inline
+	// in the client's IPC read loop, so the wait is back-pressure on that
+	// client (its later commands queue behind it), like a full TCP send
+	// buffer blocking the writer. If the data still cannot be accepted,
+	// close the stream so both ends see a failure instead of a gap.
+	if err := s.daemon.sendDataBlocking(c, data, connAdapterWriteDeadline); err != nil {
+		slog.Warn("IPC stream send failed; closing the stream instead of dropping data",
+			"conn_id", connID, "bytes", len(data), "err", err)
+		s.daemon.CloseConnection(c)
 	}
 }
 

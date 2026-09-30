@@ -18,7 +18,7 @@ func readLargeFrame(t *testing.T, c *net.UDPConn) []byte {
 	c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	defer c.SetReadDeadline(time.Time{})
 	buf := make([]byte, 65536)
-	n, _, err := c.ReadFromUDP(buf)
+	n, _, err := readFrameUDP(c, buf)
 	if err != nil {
 		return nil
 	}
@@ -156,7 +156,7 @@ func TestSendDataImmediateEmptyDataNoFrames(t *testing.T) {
 	// No frame should be sent.
 	peer.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 	buf := make([]byte, 4096)
-	n, _, err := peer.ReadFromUDP(buf)
+	n, _, err := readFrameUDP(peer, buf)
 	if err == nil {
 		t.Errorf("expected timeout, got %d bytes", n)
 	}
@@ -175,7 +175,7 @@ func TestNagleFlushEmptyBufReturnsNilWithoutSend(t *testing.T) {
 	}
 	peer.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 	buf := make([]byte, 1024)
-	if n, _, err := peer.ReadFromUDP(buf); err == nil {
+	if n, _, err := readFrameUDP(peer, buf); err == nil {
 		t.Errorf("expected no frames, got %d bytes", n)
 	}
 }
