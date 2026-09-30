@@ -3665,7 +3665,7 @@ func (d *Daemon) sendDelayedACK(conn *Connection) {
 	conn.AckMu.Unlock()
 
 	conn.Mu.Lock()
-	if conn.aborted { // nothing is sent after a reset
+	if conn.aborted { // best effort: skip ACKs for an already aborted connection
 		conn.Mu.Unlock()
 		return
 	}
@@ -4687,10 +4687,14 @@ func (d *Daemon) abortConnection(conn *Connection, reason string) {
 	conn.aborted = true // claim first: a later CloseConnection is a no-op
 	conn.State = StateClosed
 	conn.Mu.Unlock()
-	// Drop everything still queued for (re)transmission, including a FIN
-	// queued by an earlier close: nothing may follow the RST. Retransmission
-	// and fast retransmit run under RetxMu, so after this point they find
-	// nothing to send.
+	// Drop the connection's own retransmission queue (including a FIN queued
+	// by an earlier close) and unsent data, so nothing from them follows the
+	// RST: retransmission and fast retransmit run under RetxMu and find
+	// nothing after this point. Best effort beyond that: frames already
+	// handed to the tunnel (the pending-key queue, a segment send already in
+	// progress, a delayed ACK past its check) can still leave after the RST.
+	// The peer removes the connection on RST and ignores FIN/ACK/data for an
+	// unknown connection, so such stragglers do not reopen or complete it.
 	conn.RetxMu.Lock()
 	conn.Unacked = nil
 	conn.RetxMu.Unlock()
