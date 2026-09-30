@@ -4687,14 +4687,15 @@ func (d *Daemon) abortConnection(conn *Connection, reason string) {
 	conn.aborted = true // claim first: a later CloseConnection is a no-op
 	conn.State = StateClosed
 	conn.Mu.Unlock()
-	// Drop the connection's own retransmission queue (including a FIN queued
-	// by an earlier close) and unsent data, so nothing from them follows the
-	// RST: retransmission and fast retransmit run under RetxMu and find
-	// nothing after this point. Best effort beyond that: frames already
-	// handed to the tunnel (the pending-key queue, a segment send already in
-	// progress, a delayed ACK past its check) can still leave after the RST.
-	// The peer removes the connection on RST and ignores FIN/ACK/data for an
-	// unknown connection, so such stragglers do not reopen or complete it.
+	// Clear the connection's retransmission queue (including a FIN queued by
+	// an earlier close) and unsent data at teardown. This is best effort, not
+	// a "nothing after RST" guarantee: a segment send already in progress can
+	// re-add an entry (TrackSend) and send it, retransmission or ACK work that
+	// started before the abort can still run, and frames already handed to the
+	// tunnel (pending-key queue) or a delayed ACK past its check can leave
+	// after the RST. The peer removes the connection on RST and ignores
+	// FIN/ACK/data for an unknown connection, so such stragglers do not reopen
+	// or complete it (no ordering guarantee over UDP).
 	conn.RetxMu.Lock()
 	conn.Unacked = nil
 	conn.RetxMu.Unlock()
