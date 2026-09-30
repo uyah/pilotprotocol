@@ -4668,6 +4668,34 @@ func (d *Daemon) retransmitUnacked(conn *Connection) {
 // retransmission buffer so it will be retried if lost — the existing retxLoop
 // handles it. When FIN-ACK is received the connection moves to TIME_WAIT and
 // is eventually reaped by idleSweepLoop.
+// abortConnection resets a stream: RST to the peer (no FIN, so the transfer
+// is not reported as delivered), local state closed and removed, and the
+// local reader's receive buffer closed. Used when data that was handed to the
+// daemon cannot be sent, so the stream must not continue with a gap.
+func (d *Daemon) abortConnection(conn *Connection, reason string) {
+	rst := &protocol.Packet{
+		Version:  protocol.Version,
+		Flags:    protocol.FlagRST,
+		Protocol: protocol.ProtoStream,
+		Src:      conn.LocalAddr,
+		Dst:      conn.RemoteAddr,
+		SrcPort:  conn.LocalPort,
+		DstPort:  conn.RemotePort,
+	}
+	if err := d.tunnels.Send(conn.RemoteAddr.Node, rst); err != nil {
+		slog.Debug("abort: RST send failed", "conn_id", conn.ID, "err", err)
+	}
+	conn.Mu.Lock()
+	conn.State = StateClosed
+	conn.Mu.Unlock()
+	conn.CloseRecvBuf()
+	d.ports.RemoveConnection(conn.ID)
+	d.publishEvent("conn.aborted", map[string]interface{}{
+		"remote_addr": conn.RemoteAddr.String(), "remote_port": conn.RemotePort,
+		"local_port": conn.LocalPort, "conn_id": conn.ID, "reason": reason,
+	})
+}
+
 func (d *Daemon) CloseConnection(conn *Connection) {
 	// Capture every conn field this function reads under Mu; reading them
 	// post-unlock would race with concurrent state mutations from

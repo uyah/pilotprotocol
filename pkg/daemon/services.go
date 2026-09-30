@@ -132,8 +132,10 @@ func (a *connAdapter) Write(p []byte) (int, error) {
 
 // sendDataBlocking is SendData with back-pressure: while the connection's
 // send buffer is full it waits (5 ms doubling to 100 ms) and retries, until
-// the data is accepted, the connection leaves Established, or maxWait passes
-// (then the ErrSendBufFull is returned). It never drops data silently.
+// the data is accepted, the connection leaves Established, or it has kept
+// seeing a full buffer for maxWait (then ErrSendBufFull is returned). SendData
+// itself may block longer inside window/Nagle handling, so maxWait is not an
+// overall deadline. It never drops data silently.
 func (d *Daemon) sendDataBlocking(conn *Connection, p []byte, maxWait time.Duration) error {
 	backoff := 5 * time.Millisecond
 	const maxBackoff = 100 * time.Millisecond
@@ -158,8 +160,8 @@ func (d *Daemon) sendDataBlocking(conn *Connection, p []byte, maxWait time.Durat
 			return err
 		}
 		time.Sleep(backoff)
-		if backoff < maxBackoff {
-			backoff *= 2
+		if backoff *= 2; backoff > maxBackoff {
+			backoff = maxBackoff
 		}
 	}
 }

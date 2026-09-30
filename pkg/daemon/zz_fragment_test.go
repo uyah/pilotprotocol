@@ -58,7 +58,7 @@ func TestFragmentReassembleOrders(t *testing.T) {
 		if !bytes.Equal(got, frame) {
 			t.Fatalf("%s: reassembled frame differs", name)
 		}
-		if len(r.pending) != 0 || len(r.perSender) != 0 {
+		if len(r.pending) != 0 || len(r.perSource) != 0 {
 			t.Fatalf("%s: state left after completion", name)
 		}
 	}
@@ -82,7 +82,7 @@ func TestFragmentDuplicateAndMissing(t *testing.T) {
 	// A fragment of another frame after the timeout triggers the sweep.
 	other := fragmentFrame(7, 2, testFrame(t, 3000))
 	r.add(other[0][4:], fragFrom, 0, now.Add(2*fragTimeout))
-	if _, ok := r.pending[fragKey{path: fragFrom.String(), sender: 7, id: 1}]; ok || len(r.pending) != 1 {
+	if _, ok := r.pending[fragKey{source: fragFrom.String(), sender: 7, id: 1}]; ok || len(r.pending) != 1 {
 		t.Fatalf("expired partial frame kept (%d pending)", len(r.pending))
 	}
 }
@@ -106,15 +106,45 @@ func TestFragmentPendingLimits(t *testing.T) {
 	t.Parallel()
 	r := newFragReassembler()
 	now := time.Now()
-	for id := uint32(0); id < fragMaxPendingPerSender+10; id++ {
+	for id := uint32(0); id < fragMaxPendingPerSource+10; id++ {
 		f := fragmentFrame(7, id, testFrame(t, 3000))
 		r.add(f[0][4:], fragFrom, 0, now)
 	}
-	if got := r.perSender[7]; got != fragMaxPendingPerSender {
-		t.Fatalf("per-sender pending = %d, want cap %d", got, fragMaxPendingPerSender)
+	if got := r.perSource[fragFrom.String()]; got != fragMaxPendingPerSource {
+		t.Fatalf("per-source pending = %d, want cap %d", got, fragMaxPendingPerSource)
 	}
 	if r.Dropped.Load() != 10 {
 		t.Fatalf("dropped = %d, want 10", r.Dropped.Load())
+	}
+}
+
+// Another source claiming the victim's node ID must not use up the victim's
+// quota: admission is accounted per actual source.
+func TestFragmentQuotaIsPerSourceNotClaimedSender(t *testing.T) {
+	t.Parallel()
+	r := newFragReassembler()
+	now := time.Now()
+	attacker := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 9), Port: 5000}
+	const victim = 7
+	for id := uint32(0); id < fragMaxPendingPerSource+5; id++ {
+		f := fragmentFrame(victim, id, testFrame(t, 3000))
+		r.add(f[0][4:], attacker, 0, now)
+	}
+	frame := testFrame(t, 3000)
+	var got []byte
+	for _, f := range fragmentFrame(victim, 999, frame) {
+		got = r.add(f[4:], fragFrom, 0, now)
+	}
+	if !bytes.Equal(got, frame) {
+		t.Fatal("victim's frame was not reassembled after another source flooded fragments claiming its ID")
+	}
+	// Relay deliveries are accounted per beacon-reported sender.
+	frame2 := testFrame(t, 3000)
+	for _, f := range fragmentFrame(victim, 1000, frame2) {
+		got = r.add(f[4:], nil, victim, now)
+	}
+	if !bytes.Equal(got, frame2) {
+		t.Fatal("relay frame from the victim was not reassembled")
 	}
 }
 

@@ -1037,12 +1037,16 @@ func (s *IPCServer) handleSend(conn *ipcConn, reqID uint64, payload []byte) {
 	// buffer is full, wait like connAdapter.Write does. This runs inline
 	// in the client's IPC read loop, so the wait is back-pressure on that
 	// client (its later commands queue behind it), like a full TCP send
-	// buffer blocking the writer. If the data still cannot be accepted,
-	// close the stream so both ends see a failure instead of a gap.
+	// buffer blocking the writer (it also delays this client's later
+	// commands). If the data still cannot be accepted, abort the stream with
+	// RST (not an orderly FIN, which would look like a complete transfer) so
+	// it cannot continue with a gap. Note: the driver API reports both an
+	// orderly close and a reset as EOF, so applications that treat EOF as
+	// "complete" need their own framing to detect truncation.
 	if err := s.daemon.sendDataBlocking(c, data, connAdapterWriteDeadline); err != nil {
-		slog.Warn("IPC stream send failed; closing the stream instead of dropping data",
+		slog.Warn("IPC stream send failed; aborting the stream instead of dropping data",
 			"conn_id", connID, "bytes", len(data), "err", err)
-		s.daemon.CloseConnection(c)
+		s.daemon.abortConnection(c, "send buffer full")
 	}
 }
 

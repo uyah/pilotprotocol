@@ -1357,8 +1357,12 @@ func (tm *TunnelManager) readLoopOneIter() (cont bool, stopped bool) {
 	// frame below as if it had arrived in one datagram.
 	if [4]byte{frame[0], frame[1], frame[2], frame[3]} == TunnelMagicFrag {
 		full := tm.frag.add(frame[4:], remote, 0, time.Now())
-		if full == nil || len(full) < 4 || [4]byte{full[0], full[1], full[2], full[3]} == TunnelMagicFrag {
-			return true, false // incomplete, or a nested fragment (never valid)
+		if full == nil {
+			return true, false // incomplete
+		}
+		if len(full) < 4 || [4]byte{full[0], full[1], full[2], full[3]} == TunnelMagicFrag {
+			tm.frag.Dropped.Add(1) // nested fragment or runt frame: never valid
+			return true, false
 		}
 		frame, n = full, len(full)
 	}
@@ -2461,7 +2465,11 @@ func (tm *TunnelManager) handleRelayDeliver(data []byte) {
 	// PILF fragment delivered by the beacon: reassemble per relay sender.
 	if [4]byte{payload[0], payload[1], payload[2], payload[3]} == TunnelMagicFrag {
 		full := tm.frag.add(payload[4:], nil, srcNodeID, time.Now())
-		if full == nil || len(full) < 4 || [4]byte{full[0], full[1], full[2], full[3]} == TunnelMagicFrag {
+		if full == nil {
+			return
+		}
+		if len(full) < 4 || [4]byte{full[0], full[1], full[2], full[3]} == TunnelMagicFrag {
+			tm.frag.Dropped.Add(1)
 			return
 		}
 		payload = full

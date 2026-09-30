@@ -3,8 +3,10 @@
 package daemon
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,9 +26,13 @@ import (
 //
 // Fragment frame: [PILF][senderNodeID(4)][fragID(4)][index(1)][count(1)][payload]
 //
-// The header is not authenticated. A forged or corrupted fragment can only
-// make reassembly fail or produce a frame that then fails the normal checks
-// (AEAD for PILS, signatures for PILA); memory is bounded by the limits below.
+// The header is not authenticated. A reassembled frame goes through exactly
+// the same dispatch and checks as a frame received in one datagram (AEAD for
+// PILS, signatures for PILA, the existing policies for PILK and plaintext), so
+// fragmentation adds no way around them. Admission is accounted per actual
+// source (remote UDP address, or the beacon-reported relay sender), never per
+// the claimed sender ID, so a third party cannot use up another peer's quota;
+// memory is bounded by the limits below.
 // Both peers must support PILF: a peer without it drops the fragments, so
 // frames larger than one fragment do not reach it.
 
@@ -46,9 +52,10 @@ const (
 	// fragTimeout drops incomplete frames; the stream layer retransmits.
 	fragTimeout = 3 * time.Second
 	// fragMaxPending bounds partially reassembled frames overall and per
-	// sender, so a flood of first fragments cannot grow memory.
-	fragMaxPending          = 1024
-	fragMaxPendingPerSender = 64
+	// source, so a flood of first fragments cannot grow memory beyond about
+	// fragMaxPending*fragMaxCount*fragMaxPayload (~19 MiB).
+	fragMaxPending          = 256
+	fragMaxPendingPerSource = 32
 )
 
 // fragmentFrame splits frame into PILF fragment frames, or returns it
@@ -81,7 +88,7 @@ func fragmentFrame(senderNodeID, fragID uint32, frame []byte) [][]byte {
 }
 
 type fragKey struct {
-	path   string // remote UDP address, or "relay" for beacon-delivered fragments
+	source string // remote UDP address, or "relay:<beacon-reported sender>"
 	sender uint32
 	id     uint32
 }
@@ -96,7 +103,7 @@ type fragPartial struct {
 type fragReassembler struct {
 	mu        sync.Mutex
 	pending   map[fragKey]*fragPartial
-	perSender map[uint32]int
+	perSource map[string]int
 	lastSweep time.Time
 	nextID    atomic.Uint32
 
@@ -104,7 +111,11 @@ type fragReassembler struct {
 }
 
 func newFragReassembler() *fragReassembler {
-	return &fragReassembler{pending: map[fragKey]*fragPartial{}, perSender: map[uint32]int{}}
+	r := &fragReassembler{pending: map[fragKey]*fragPartial{}, perSource: map[string]int{}}
+	var seed [4]byte
+	_, _ = rand.Read(seed[:])
+	r.nextID.Store(binary.BigEndian.Uint32(seed[:])) // fresh IDs after a restart
+	return r
 }
 
 // add consumes one fragment (bytes after the PILF magic). It returns the
@@ -112,6 +123,11 @@ func newFragReassembler() *fragReassembler {
 // relaySender, when non-zero, is the sender reported by the beacon; the
 // fragment header must match it.
 func (r *fragReassembler) add(data []byte, from *net.UDPAddr, relaySender uint32, now time.Time) []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if now.Sub(r.lastSweep) > fragTimeout/3 {
+		r.sweepLocked(now)
+	}
 	if len(data) < fragHeaderLen-4+1 {
 		r.Dropped.Add(1)
 		return nil
@@ -125,29 +141,26 @@ func (r *fragReassembler) add(data []byte, from *net.UDPAddr, relaySender uint32
 		r.Dropped.Add(1)
 		return nil
 	}
-	key := fragKey{sender: sender, id: id, path: "relay"}
-	if relaySender == 0 {
+	key := fragKey{sender: sender, id: id}
+	if relaySender != 0 {
+		key.source = "relay:" + strconv.FormatUint(uint64(relaySender), 10)
+	} else {
 		if from == nil {
 			r.Dropped.Add(1)
 			return nil
 		}
-		key.path = from.String()
+		key.source = from.String()
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if now.Sub(r.lastSweep) > fragTimeout/3 {
-		r.sweepLocked(now)
-	}
 	p := r.pending[key]
 	if p == nil {
-		if len(r.pending) >= fragMaxPending || r.perSender[sender] >= fragMaxPendingPerSender {
+		if len(r.pending) >= fragMaxPending || r.perSource[key.source] >= fragMaxPendingPerSource {
 			r.Dropped.Add(1)
 			return nil
 		}
 		p = &fragPartial{parts: make([][]byte, count), created: now}
 		r.pending[key] = p
-		r.perSender[sender]++
+		r.perSource[key.source]++
 	}
 	if len(p.parts) != count || p.parts[idx] != nil {
 		r.Dropped.Add(1) // inconsistent count or duplicate
@@ -172,8 +185,8 @@ func (r *fragReassembler) add(data []byte, from *net.UDPAddr, relaySender uint32
 
 func (r *fragReassembler) deleteLocked(k fragKey) {
 	delete(r.pending, k)
-	if r.perSender[k.sender]--; r.perSender[k.sender] <= 0 {
-		delete(r.perSender, k.sender)
+	if r.perSource[k.source]--; r.perSource[k.source] <= 0 {
+		delete(r.perSource, k.source)
 	}
 }
 
