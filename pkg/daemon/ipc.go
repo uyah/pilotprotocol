@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Modified 2026-09-30..2026-10-01 by the Agent Network authors (d25-dev): driver writes wait or abort with RST instead of being dropped.
+// See MODIFICATIONS.md.
 
 package daemon
 

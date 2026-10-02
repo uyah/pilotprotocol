@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Added 2026-09-30..2026-10-01 by the Agent Network authors (d25-dev): new file: PILF tunnel fragmentation and reassembly.
+// See MODIFICATIONS.md.
 
 package daemon
 
